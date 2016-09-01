@@ -115,7 +115,7 @@ static void handle_package(u_char *args, const struct pcap_pkthdr *header, const
         accept_ack *ack = payload;
         /* req_id | node_id | time_s | time_us */
         gettimeofday(&tv, 0);
-        fprintf(fp_log, "%d %d %ld %ld", ack->msg_vs.req_id, ack->node_id, tv.tv_sec, tv.tv_usec);
+        fprintf(fp_log, "%d %d %ld %ld\n", ack->msg_vs.req_id, ack->node_id, tv.tv_sec, tv.tv_usec);
     }
 }
 
