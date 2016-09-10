@@ -8,6 +8,8 @@
 #define SIZE_ETHERNET 14
 #define ETHER_ADDR_LEN	6
 
+#define start_second 1473087552
+
 /* Ethernet header */
 struct sniff_ethernet {
     u_char ether_dhost[ETHER_ADDR_LEN]; /* Destination host address */
@@ -88,10 +90,45 @@ typedef struct accept_ack_t{
     view_stamp msg_vs;
     node_id_t node_id;
 }accept_ack;
+#define ACCEPT_ACK_SIZE (sizeof(accept_ack))
+
+typedef enum sys_msg_code_t{
+    PING_REQ = 0,
+    PING_ACK = 1,
+    REQUEST_SUBMIT = 2,
+    REQUEST_SUBMIT_REPLY = 3,
+    REQUEST_CHECK = 4,
+    CONSENSUS_MSG = 5,
+    CLIENT_SYNC_REQ = 11,
+    CLIENT_SYNC_ACK = 12,
+    LEADER_ELECTION_MSG = 16,
+}sys_msg_code;
+
+typedef enum req_sub_code_t{
+    SUB_SUCC = 0,
+    NO_LEADER = 1,
+    IN_ERROR = 2,
+    NO_RECORD = 3,
+    ON_GOING = 4,
+    FORFEITED = 5,
+    FINISHED = 6,
+}req_sub_code;
+
+typedef struct sys_msg_header_t{
+    sys_msg_code type;
+    size_t data_size;
+}sys_msg_header;
+#define SYS_MSG_HEADER_SIZE (sizeof(sys_msg_header))
+
+long long timestamp_array[200][9];
+int count[1000000];
+
+int max = 3;
 
 FILE *fp_log;
-struct timeval tv;
+FILE *total_log;
 static void handle_package(u_char *args, const struct pcap_pkthdr *header, const u_char *pcakage){
+	int package_count = 0;
     if (header->len <= 0) {
         return;
     }
@@ -109,18 +146,49 @@ static void handle_package(u_char *args, const struct pcap_pkthdr *header, const
         return;
     }
     payload = pcakage + SIZE_ETHERNET + size_ip + size_tcp;
-    int len = pcakage - SIZE_ETHERNET - size_ip - size_tcp;
-    consensus_msg_header* msg_header = payload;
-    if (msg_header->msg_type == ACCEPT_ACK) {
-        accept_ack *ack = payload;
-        /* req_id | node_id | time_s | time_us */
-        gettimeofday(&tv, 0);
-        fprintf(fp_log, "%d %d %ld %ld\n", ack->msg_vs.req_id, ack->node_id, tv.tv_sec, tv.tv_usec);
-    }
+    int len = header->len - SIZE_ETHERNET - size_ip - size_tcp;
+    if (len <= SYS_MSG_HEADER_SIZE ) {
+		return;	
+	}
+	package_count = len / (ACCEPT_ACK_SIZE + SYS_MSG_HEADER_SIZE);
+	// printf("accept %d ack\n", package_count);
+    consensus_msg_header* msg_header = payload + SYS_MSG_HEADER_SIZE;
+    int i = 0;
+    for (;i < package_count;i++) {
+	    if (msg_header->msg_type == ACCEPT_ACK) {
+	        accept_ack *ack = payload + SYS_MSG_HEADER_SIZE;
+	         // req_id | node_id | time_s | time_us 
+	        timestamp_array[ack->msg_vs.req_id % 200][count[ack->msg_vs.req_id]] = 
+            (header->ts.tv_sec - start_second)*1000000 + header->ts.tv_usec;
+            count[ack->msg_vs.req_id]++;
+            if (count[ack->msg_vs.req_id] >= max) {
+                count[ack->msg_vs.req_id] = -100;
+                fprintf(fp_log, "%d %lld %lld %lld %lld\n", 
+                    ack->msg_vs.req_id, timestamp_array[ack->msg_vs.req_id % 200][0],
+                    timestamp_array[ack->msg_vs.req_id % 200][1] - timestamp_array[ack->msg_vs.req_id % 200][0],
+                    timestamp_array[ack->msg_vs.req_id % 200][2] - timestamp_array[ack->msg_vs.req_id % 200][1],
+                    timestamp_array[ack->msg_vs.req_id % 200][3] - timestamp_array[ack->msg_vs.req_id % 200][2]
+                    );
+                fprintf(total_log, "%d %lld %lld %lld %lld\n", 
+                    ack->msg_vs.req_id, timestamp_array[ack->msg_vs.req_id % 200][0],
+                    timestamp_array[ack->msg_vs.req_id % 200][1],
+                    timestamp_array[ack->msg_vs.req_id % 200][2],
+                    timestamp_array[ack->msg_vs.req_id % 200][3],
+                    timestamp_array[ack->msg_vs.req_id % 200][4]
+                    );
+            }
+            
+	    }
+	    payload += ACCEPT_ACK_SIZE + SYS_MSG_HEADER_SIZE;
+	}
 }
 
 int main(int argc, char **args) {
+    memset(timestamp_array, 0, sizeof(long long)*200*9);
+    memset(count, 0, sizeof(int) * 1000000);
     const char *_dev = args[1];
+    max = atoi(args[2]);
+    max = (max / 2) + 1;
     bpf_u_int32 mask;
     bpf_u_int32 net;
     char error_buf[1000];
@@ -128,12 +196,12 @@ int main(int argc, char **args) {
         printf("error getting netmask");
         return -1;
     }
-    pcap_t *capture_engine = pcap_open_live(_dev, 3000, 1, 1000, error_buf);
+    pcap_t *capture_engine = pcap_open_live(_dev, 3000, 1, 0, error_buf);
     if (capture_engine == NULL) {
         printf("error opening capture engine");
         return -1;
     }
-    const char *filter = "tcp dst port 8000 and dst 10.22.1.1";
+    const char *filter = "dst port 8000 and dst 10.22.1.1";
     struct bpf_program fp;
     if (pcap_compile(capture_engine, &fp, filter, 0, net) == -1) {
         printf("error compiling filter");
@@ -145,7 +213,8 @@ int main(int argc, char **args) {
     }
     printf("open engine in dev %s\n", _dev);
     fp_log = fopen("/home/jianyu/ack.log", "w+");
-    if (fp_log == NULL) {
+    total_log = fopen("/home/jianyu/ack.total.log", "w+");
+    if (fp_log == NULL || total_log == NULL) {
         printf("error opening ack log file");
         return -1;
     }
